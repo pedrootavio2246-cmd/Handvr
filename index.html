@@ -2,12 +2,15 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+  />
   <meta name="theme-color" content="#05070d" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="HandFusion VR" />
-  <title>HandFusion VR v0.5</title>
+  <title>HandFusion VR v0.6 3D</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icon-192.png" />
   <link rel="stylesheet" href="./style.css" />
@@ -16,50 +19,12 @@
   <video id="camera" playsinline muted></video>
   <canvas id="view"></canvas>
 
-
-  <div id="spatialLayer" class="spatial-layer hidden" aria-hidden="true">
-    <div id="screenSingle" class="spatial-screen hidden">
-      <div class="screen-titlebar">
-        <span>YouTube espacial</span>
-        <span class="grab-hint">🤏 mover</span>
-      </div>
-      <div id="ytSingle" class="youtube-player">
-        <div class="screen-placeholder">Cole um link do YouTube no painel.</div>
-      </div>
-    </div>
-
-    <div id="screenLeft" class="spatial-screen hidden">
-      <div class="screen-titlebar">
-        <span>YouTube espacial</span>
-        <span class="grab-hint">🤏 mover</span>
-      </div>
-      <div id="ytLeft" class="youtube-player">
-        <div class="screen-placeholder">Cole um link do YouTube no painel.</div>
-      </div>
-    </div>
-
-    <div id="screenRight" class="spatial-screen hidden">
-      <div class="screen-titlebar">
-        <span>YouTube espacial</span>
-        <span class="grab-hint">🤏 mover</span>
-      </div>
-      <div id="ytRight" class="youtube-player">
-        <div class="screen-placeholder">Cole um link do YouTube no painel.</div>
-      </div>
-    </div>
-
-    <div id="cursorSingle" class="hand-cursor hidden"></div>
-    <div id="cursorLeft" class="hand-cursor hidden"></div>
-    <div id="cursorRight" class="hand-cursor hidden"></div>
-  </div>
-
-  <div id="rotateNotice" class="notice hidden">
-    Gire o iPhone para o modo paisagem.
-  </div>
-
   <section id="startPanel" class="panel">
-    <h1>HandFusion VR</h1><div class="version">v0.5 Google + 2 mãos</div>
-    <p>Painel espacial experimental com duas mãos, Google e teclado virtual.</p>
+    <h1>HandFusion VR</h1>
+    <div class="version">v0.6 — 3D real</div>
+    <p>
+      Painel, teclado, cubo e mãos renderizados em uma cena 3D WebGL.
+    </p>
 
     <label class="startup-performance">
       Desempenho
@@ -70,83 +35,70 @@
       </select>
     </label>
 
-    <button id="startButton" class="primary">Iniciar câmera e rastreamento</button>
+    <button id="startButton" class="primary">
+      Iniciar câmera e rastreamento
+    </button>
+
     <p class="small">
-      Use em local bem iluminado. A câmera traseira precisa ficar descoberta.
+      Use em local iluminado e deixe a câmera traseira descoberta.
     </p>
     <div id="bootStatus" class="status">Aguardando início.</div>
-  </section>
-
-
-  <section id="screenPanel" class="panel screen-panel hidden">
-    <h2>Tela espacial</h2>
-    <p>Cole o link de um vídeo do YouTube. Depois use a pinça perto da tela para arrastá-la.</p>
-
-    <label class="field-label" for="youtubeUrl">Link ou ID do vídeo</label>
-    <input
-      id="youtubeUrl"
-      class="text-input"
-      type="url"
-      inputmode="url"
-      placeholder="https://www.youtube.com/watch?v=..."
-      autocomplete="off"
-    />
-
-    <div class="screen-actions">
-      <button id="loadYoutubeButton" class="primary">Carregar vídeo</button>
-      <button id="playYoutubeButton">▶ Reproduzir</button>
-      <button id="pauseYoutubeButton">⏸ Pausar</button>
-      <button id="centerScreenButton">Centralizar</button>
-      <button id="hideScreenButton">Ocultar tela</button>
-      <button id="closeScreenPanelButton">Fechar painel</button>
-    </div>
-
-    <label class="screen-size-label">
-      Tamanho da tela
-      <input id="screenSize" type="range" min="0.30" max="0.92" step="0.01" value="0.64" />
-    </label>
-
-    <div id="screenStatus" class="status">
-      Nenhum vídeo carregado.
-    </div>
-    <p class="small">
-      No iPhone, toque em “Reproduzir” antes de colocar o aparelho no VR Box.
-    </p>
   </section>
 
   <header id="hud" class="hud hidden">
     <div class="badge">
       <span id="fps">0 FPS</span>
       <span id="hands">0 mãos</span>
+      <span id="modeLabel">3D</span>
     </div>
     <div id="gesture" class="gesture">Sem mãos</div>
   </header>
 
   <aside id="controls" class="controls hidden">
-    <button id="vrButton">Modo VR</button>
-    <button id="objectsButton">Objetos: ON</button>
-    <button id="cameraButton">Trocar câmera</button>
-    <button id="fullscreenButton">Tela cheia</button>
-    <button id="screenButton">Tela YouTube</button>
-    <button id="screenVisibilityButton">Tela: OFF</button>
-    <button id="browserButton">Google: ON</button>
-    <button id="keyboardToggleButton">Teclado: OFF</button>
+    <button id="vrButton">VR dividido: ON</button>
+    <button id="browserButton">Painel Google: ON</button>
+    <button id="keyboardButton">Teclado: OFF</button>
+    <button id="handsButton">Mãos 3D: ON</button>
+    <button id="rotateButton">Girar painel 45°</button>
     <button id="recenterButton">Recentralizar</button>
+    <button id="arButton" disabled>AR 6DoF: verificando</button>
+    <button id="cameraButton">Trocar câmera</button>
     <button id="performanceButton">Desempenho: Leve</button>
-    <button id="skeletonButton">Mãos: ON</button>
+    <button id="fullscreenButton">Tela cheia</button>
+
     <label>
       Suavização
-      <input id="smoothing" type="range" min="0" max="0.92" step="0.02" value="0.70" />
+      <input
+        id="smoothing"
+        type="range"
+        min="0"
+        max="0.92"
+        step="0.02"
+        value="0.72"
+      />
     </label>
+
     <label>
       Separação
-      <input id="eyeSeparation" type="range" min="0" max="28" step="1" value="10" />
+      <input
+        id="eyeSeparation"
+        type="range"
+        min="0.025"
+        max="0.085"
+        step="0.002"
+        value="0.058"
+      />
     </label>
-    <button id="hideControlsButton">Ocultar painel</button>
+
+    <button id="hideControlsButton">Ocultar controles</button>
   </aside>
 
   <button id="showControlsButton" class="floating hidden">⚙️</button>
 
-  <script type="module" src="./app.js?v=0.5"></script>
+  <div id="rotateNotice" class="notice hidden">
+    Gire o celular para paisagem.
+  </div>
+
+  <script type="module" src="./app.js?v=0.6"></script>
 </body>
 </html>

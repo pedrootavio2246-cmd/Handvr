@@ -5,7 +5,7 @@
       "headers": [
         {
           "key": "Permissions-Policy",
-          "value": "camera=(self)"
+          "value": "camera=(self), gyroscope=(self), accelerometer=(self), xr-spatial-tracking=(self)"
         },
         {
           "key": "X-Content-Type-Options",
