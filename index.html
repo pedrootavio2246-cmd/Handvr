@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="HandFusion VR" />
-  <title>HandFusion VR v0.3</title>
+  <title>HandFusion VR v0.5</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icon-192.png" />
   <link rel="stylesheet" href="./style.css" />
@@ -58,8 +58,18 @@
   </div>
 
   <section id="startPanel" class="panel">
-    <h1>HandFusion VR</h1><div class="version">v0.3 telas espaciais</div>
-    <p>Protótipo experimental de hand tracking para iPhone + VR Box.</p>
+    <h1>HandFusion VR</h1><div class="version">v0.5 Google + 2 mãos</div>
+    <p>Painel espacial experimental com duas mãos, Google e teclado virtual.</p>
+
+    <label class="startup-performance">
+      Desempenho
+      <select id="performancePreset">
+        <option value="lite">Leve — Android fraco</option>
+        <option value="balanced">Equilibrado</option>
+        <option value="quality">Qualidade — celular forte</option>
+      </select>
+    </label>
+
     <button id="startButton" class="primary">Iniciar câmera e rastreamento</button>
     <p class="small">
       Use em local bem iluminado. A câmera traseira precisa ficar descoberta.
@@ -119,6 +129,11 @@
     <button id="fullscreenButton">Tela cheia</button>
     <button id="screenButton">Tela YouTube</button>
     <button id="screenVisibilityButton">Tela: OFF</button>
+    <button id="browserButton">Google: ON</button>
+    <button id="keyboardToggleButton">Teclado: OFF</button>
+    <button id="recenterButton">Recentralizar</button>
+    <button id="performanceButton">Desempenho: Leve</button>
+    <button id="skeletonButton">Mãos: ON</button>
     <label>
       Suavização
       <input id="smoothing" type="range" min="0" max="0.92" step="0.02" value="0.70" />
@@ -132,6 +147,6 @@
 
   <button id="showControlsButton" class="floating hidden">⚙️</button>
 
-  <script type="module" src="./app.js?v=0.3"></script>
+  <script type="module" src="./app.js?v=0.5"></script>
 </body>
 </html>

@@ -379,3 +379,58 @@ body {
     overflow-y: auto;
   }
 }
+
+
+/* HandFusion VR v0.4 — otimização de desempenho */
+.startup-performance {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0 10px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.startup-performance select {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.17);
+  background: #151b28;
+  color: #fff;
+  font-size: 14px;
+}
+
+body.performance-lite .panel,
+body.performance-lite .controls,
+body.performance-lite .badge,
+body.performance-lite .gesture {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+body.performance-lite .spatial-screen {
+  box-shadow: none !important;
+}
+
+body.performance-lite .hand-cursor {
+  box-shadow: none !important;
+}
+
+body.performance-lite .spatial-screen.grabbed {
+  box-shadow: 0 0 10px rgba(255, 232, 80, 0.35) !important;
+}
+
+
+/* v0.5: painel Google e teclado são desenhados no canvas para reduzir DOM e travamentos. */
+body.performance-lite #hud {
+  opacity: 0.88;
+}
+
+body.browser-active .spatial-layer {
+  pointer-events: none;
+}

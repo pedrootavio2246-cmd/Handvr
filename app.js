@@ -1,4 +1,4 @@
-// HandFusion VR v0.3
+// HandFusion VR v0.5 — Google panel, two hands and lightweight 3DoF
 // MediaPipe is imported only after the user presses Start.
 // This keeps the interface alive and shows a useful error if the CDN fails.
 
@@ -77,19 +77,111 @@ const hideScreenButton = document.querySelector("#hideScreenButton");
 const closeScreenPanelButton = document.querySelector("#closeScreenPanelButton");
 const screenSizeInput = document.querySelector("#screenSize");
 const screenStatus = document.querySelector("#screenStatus");
+const performancePreset = document.querySelector("#performancePreset");
+const performanceButton = document.querySelector("#performanceButton");
+const skeletonButton = document.querySelector("#skeletonButton");
+const browserButton = document.querySelector("#browserButton");
+const keyboardToggleButton = document.querySelector("#keyboardToggleButton");
+const recenterButton = document.querySelector("#recenterButton");
 
 
 let handLandmarker = null;
 let stream = null;
 let facingMode = "environment";
 let vrMode = true;
-let objectsEnabled = true;
+let objectsEnabled = false;
 let running = false;
 let lastVideoTime = -1;
 let lastFrameTimestamp = performance.now();
 let fpsAverage = 0;
 let lastResults = null;
 let wakeLock = null;
+
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const PERFORMANCE_PROFILES = {
+  lite: {
+    label: "Leve",
+    canvasScale: 0.62,
+    cameraWidth: 640,
+    cameraHeight: 360,
+    cameraFps: 20,
+    trackingFps: 9,
+    renderFps: 30,
+    numHands: 2,
+    fullLandmarkDots: false,
+    shadows: false
+  },
+  balanced: {
+    label: "Equilibrado",
+    canvasScale: 0.82,
+    cameraWidth: 854,
+    cameraHeight: 480,
+    cameraFps: 24,
+    trackingFps: 14,
+    renderFps: 40,
+    numHands: 2,
+    fullLandmarkDots: false,
+    shadows: false
+  },
+  quality: {
+    label: "Qualidade",
+    canvasScale: Math.min(window.devicePixelRatio || 1, 1.15),
+    cameraWidth: 1280,
+    cameraHeight: 720,
+    cameraFps: 30,
+    trackingFps: 20,
+    renderFps: 55,
+    numHands: 2,
+    fullLandmarkDots: true,
+    shadows: true
+  }
+};
+
+let performanceMode = IS_ANDROID ? "lite" : "balanced";
+let skeletonEnabled = !IS_ANDROID;
+let preparedHands = [];
+let lastInferenceAt = 0;
+let lastRenderAt = 0;
+let lastHudAt = 0;
+let spatialLayoutDirty = true;
+let profileChanging = false;
+
+let browserVisible = true;
+let keyboardVisible = false;
+let browserQuery = localStorage.getItem("hf_browser_query") || "";
+let browserSuggestions = [];
+let suggestionTimer = null;
+let activeSearchMode = "google";
+let lastUiClickAt = 0;
+
+const browserPanel = {
+  x: 0.47,
+  y: 0.31,
+  width: 0.70,
+  height: 0.43
+};
+
+const uiHandStates = new Map();
+let browserDrag = null;
+
+const KEYBOARD_ROWS = [
+  ["Q","W","E","R","T","Y","U","I","O","P"],
+  ["A","S","D","F","G","H","J","K","L"],
+  ["Z","X","C","V","B","N","M","⌫"],
+  ["FECHAR","ESPAÇO","BUSCAR"]
+];
+
+const orientationState = {
+  permission: "unknown",
+  received: false,
+  alpha: 0,
+  beta: 0,
+  gamma: 0,
+  baseAlpha: null,
+  baseBeta: null,
+  baseGamma: null
+};
+
 
 let screenVisible = false;
 let screenHasVideo = false;
@@ -133,10 +225,14 @@ function distance2D(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function currentProfile() {
+  return PERFORMANCE_PROFILES[performanceMode];
+}
+
 function resizeCanvas() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const width = Math.max(1, Math.floor(window.innerWidth * dpr));
-  const height = Math.max(1, Math.floor(window.innerHeight * dpr));
+  const scale = currentProfile().canvasScale;
+  const width = Math.max(1, Math.floor(window.innerWidth * scale));
+  const height = Math.max(1, Math.floor(window.innerHeight * scale));
 
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
@@ -145,6 +241,40 @@ function resizeCanvas() {
 
   const portrait = window.innerHeight > window.innerWidth;
   rotateNotice.classList.toggle("hidden", !portrait || !running);
+  spatialLayoutDirty = true;
+}
+
+function updatePerformanceUi() {
+  const profile = currentProfile();
+  performancePreset.value = performanceMode;
+  performanceButton.textContent = `Desempenho: ${profile.label}`;
+  document.body.classList.toggle("performance-lite", performanceMode === "lite");
+  document.body.classList.toggle("browser-active", browserVisible);
+}
+
+async function applyPerformanceMode(mode, restart = false) {
+  if (!PERFORMANCE_PROFILES[mode] || profileChanging) return;
+
+  performanceMode = mode;
+  updatePerformanceUi();
+  resizeCanvas();
+
+  if (!running || !restart) return;
+
+  profileChanging = true;
+  gestureLabel.textContent = "Otimizando...";
+  try {
+    await createLandmarker();
+    await startCamera();
+    smoothedByHand.clear();
+    preparedHands = [];
+    gestureLabel.textContent = `Modo ${currentProfile().label}`;
+  } catch (error) {
+    console.error("Falha ao mudar desempenho:", error);
+    gestureLabel.textContent = "Erro ao mudar desempenho";
+  } finally {
+    profileChanging = false;
+  }
 }
 
 function coverSourceRect(sourceWidth, sourceHeight, targetWidth, targetHeight) {
@@ -202,26 +332,71 @@ function detectGesture(points) {
   const palmSize = Math.max(distance2D(points[0], points[9]), 0.001);
   const pinchRatio = distance2D(points[4], points[8]) / palmSize;
 
+  const indexExtended = fingerExtended(points, 8, 6);
+  const middleExtended = fingerExtended(points, 12, 10);
+  const ringExtended = fingerExtended(points, 16, 14);
+  const pinkyExtended = fingerExtended(points, 20, 18);
+
   const extended = [
-    fingerExtended(points, 8, 6),
-    fingerExtended(points, 12, 10),
-    fingerExtended(points, 16, 14),
-    fingerExtended(points, 20, 18)
+    indexExtended,
+    middleExtended,
+    ringExtended,
+    pinkyExtended
   ].filter(Boolean).length;
 
-  if (pinchRatio < 0.34) {
-    return { name: "Pinça", pinching: true, pinchRatio };
+  const pinching = pinchRatio < 0.34;
+  const okSign =
+    pinchRatio < 0.31 &&
+    !middleExtended &&
+    !ringExtended &&
+    !pinkyExtended;
+
+  if (okSign) {
+    return {
+      name: "OK",
+      pinching: true,
+      okSign: true,
+      pinchRatio
+    };
+  }
+  if (pinching) {
+    return {
+      name: "Pinça",
+      pinching: true,
+      okSign: false,
+      pinchRatio
+    };
   }
   if (extended >= 4) {
-    return { name: "Mão aberta", pinching: false, pinchRatio };
+    return {
+      name: "Mão aberta",
+      pinching: false,
+      okSign: false,
+      pinchRatio
+    };
   }
   if (extended <= 1) {
-    return { name: "Punho", pinching: false, pinchRatio };
+    return {
+      name: "Punho",
+      pinching: false,
+      okSign: false,
+      pinchRatio
+    };
   }
-  if (fingerExtended(points, 8, 6) && extended <= 2) {
-    return { name: "Apontando", pinching: false, pinchRatio };
+  if (indexExtended && extended <= 2) {
+    return {
+      name: "Apontando",
+      pinching: false,
+      okSign: false,
+      pinchRatio
+    };
   }
-  return { name: "Rastreando", pinching: false, pinchRatio };
+  return {
+    name: "Rastreando",
+    pinching: false,
+    okSign: false,
+    pinchRatio
+  };
 }
 
 function getHandLabel(results, index) {
@@ -280,8 +455,10 @@ function drawLabObjects(eyeX, eyeWidth, eyeHeight, eyeSign) {
     ctx.lineWidth = Math.max(2, eyeWidth * 0.004);
     ctx.strokeStyle = "rgba(255,255,255,0.95)";
     ctx.fillStyle = "rgba(30, 210, 255, 0.28)";
-    ctx.shadowBlur = radius * 0.7;
-    ctx.shadowColor = "rgba(30, 210, 255, 0.7)";
+    if (currentProfile().shadows) {
+      ctx.shadowBlur = radius * 0.7;
+      ctx.shadowColor = "rgba(30, 210, 255, 0.7)";
+    }
 
     ctx.beginPath();
     if (object.shape === "circle") {
@@ -301,6 +478,8 @@ function drawLabObjects(eyeX, eyeWidth, eyeHeight, eyeSign) {
 }
 
 function drawHand(points, label, gesture, eyeX, eyeWidth, eyeHeight, eyeSign) {
+  if (!skeletonEnabled) return;
+
   const projected = points.map((point) =>
     projectLandmark(point, eyeX, eyeWidth, eyeHeight, eyeSign)
   );
@@ -313,40 +492,45 @@ function drawHand(points, label, gesture, eyeX, eyeWidth, eyeHeight, eyeSign) {
       ? "rgba(121, 255, 184, 0.95)"
       : "rgba(110, 196, 255, 0.95)";
   ctx.fillStyle = "rgba(255,255,255,0.96)";
-  ctx.lineWidth = Math.max(2, eyeWidth * 0.006);
-  ctx.shadowBlur = 8;
-  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.lineWidth = Math.max(1.5, eyeWidth * 0.005);
 
-  for (const [start, end] of HAND_CONNECTIONS) {
-    ctx.beginPath();
-    ctx.moveTo(projected[start].x, projected[start].y);
-    ctx.lineTo(projected[end].x, projected[end].y);
-    ctx.stroke();
+  if (currentProfile().shadows) {
+    ctx.shadowBlur = 7;
+    ctx.shadowColor = "rgba(0,0,0,0.5)";
   }
 
-  const dotRadius = Math.max(2.2, eyeWidth * 0.007);
-  projected.forEach((point, index) => {
+  ctx.beginPath();
+  for (const [start, end] of HAND_CONNECTIONS) {
+    ctx.moveTo(projected[start].x, projected[start].y);
+    ctx.lineTo(projected[end].x, projected[end].y);
+  }
+  ctx.stroke();
+
+  const dotRadius = Math.max(1.8, eyeWidth * 0.006);
+  const pointIndexes = currentProfile().fullLandmarkDots
+    ? projected.map((_, index) => index)
+    : [0, 4, 8, 12, 16, 20];
+
+  for (const index of pointIndexes) {
+    const point = projected[index];
     ctx.beginPath();
     ctx.arc(
       point.x,
       point.y,
-      index === 4 || index === 8 ? dotRadius * 1.45 : dotRadius,
+      index === 4 || index === 8 ? dotRadius * 1.4 : dotRadius,
       0,
       Math.PI * 2
     );
     ctx.fill();
-  });
-
-  const pinchPoint = {
-    x: (projected[4].x + projected[8].x) / 2,
-    y: (projected[4].y + projected[8].y) / 2
-  };
+  }
 
   if (gesture.pinching) {
+    const pinchX = (projected[4].x + projected[8].x) / 2;
+    const pinchY = (projected[4].y + projected[8].y) / 2;
     ctx.strokeStyle = "rgba(255, 235, 92, 1)";
-    ctx.lineWidth = Math.max(3, eyeWidth * 0.009);
+    ctx.lineWidth = Math.max(2.5, eyeWidth * 0.008);
     ctx.beginPath();
-    ctx.arc(pinchPoint.x, pinchPoint.y, dotRadius * 3.2, 0, Math.PI * 2);
+    ctx.arc(pinchX, pinchY, dotRadius * 3, 0, Math.PI * 2);
     ctx.stroke();
   }
 
@@ -455,11 +639,14 @@ function showSpatialScreen(visible = true) {
     );
   }
 
-  updateSpatialLayout();
+  spatialLayoutDirty = true;
 }
 
 function updateSpatialLayout() {
-  if (!screenVisible) return;
+  if (!screenVisible) {
+    spatialLayoutDirty = false;
+    return;
+  }
 
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
@@ -490,20 +677,21 @@ function updateSpatialLayout() {
     element.style.top = `${spatialScreenState.y * viewportHeight}px`;
   };
 
+  screenSingle.classList.add("hidden");
+
   if (vrMode) {
-    screenSingle.classList.add("hidden");
     screenLeft.classList.remove("hidden");
     screenRight.classList.remove("hidden");
     apply(screenLeft, 0, viewportWidth / 2);
     apply(screenRight, 1, viewportWidth / 2);
   } else {
-    screenSingle.classList.remove("hidden");
-    screenLeft.classList.add("hidden");
+    screenLeft.classList.remove("hidden");
     screenRight.classList.add("hidden");
-    apply(screenSingle, 0, viewportWidth);
+    apply(screenLeft, 0, viewportWidth);
   }
-}
 
+  spatialLayoutDirty = false;
+}
 function spatialScreenNormalizedHeight() {
   const eyeWidth = vrMode ? window.innerWidth / 2 : window.innerWidth;
   const pixelHeight =
@@ -569,25 +757,24 @@ function interactWithSpatialScreen(handKey, points, gesture) {
       halfHeight,
       1 - halfHeight
     );
-    updateSpatialLayout();
+    spatialLayoutDirty = true;
     return true;
   }
 
   return false;
 }
 
-function updateSpatialCursors(results) {
+function updateSpatialCursors(hands) {
   const cursors = [cursorSingle, cursorLeft, cursorRight];
 
-  if (!screenVisible || !results?.landmarks?.length) {
+  if (!screenVisible || !hands?.length) {
     cursors.forEach((cursor) => cursor.classList.add("hidden"));
     return;
   }
 
-  const rawPoints = results.landmarks[0];
-  const label = getHandLabel(results, 0);
-  const points = smoothedByHand.get(`${label}-0`) || rawPoints;
-  const gesture = detectGesture(points);
+  const hand = hands[0];
+  const points = hand.points;
+  const gesture = hand.gesture;
   const point = {
     x: (points[4].x + points[8].x) / 2,
     y: (points[4].y + points[8].y) / 2
@@ -600,14 +787,14 @@ function updateSpatialCursors(results) {
     cursor.style.top = `${point.y * window.innerHeight}px`;
   };
 
+  cursorSingle.classList.add("hidden");
+
   if (vrMode) {
-    cursorSingle.classList.add("hidden");
     placeCursor(cursorLeft, 0, window.innerWidth / 2);
     placeCursor(cursorRight, 1, window.innerWidth / 2);
   } else {
-    cursorLeft.classList.add("hidden");
     cursorRight.classList.add("hidden");
-    placeCursor(cursorSingle, 0, window.innerWidth);
+    placeCursor(cursorLeft, 0, window.innerWidth);
   }
 }
 
@@ -704,14 +891,9 @@ async function createYouTubePlayers(videoId) {
   await loadYouTubeApi();
   destroyYouTubePlayers();
 
-  replacePlayerSlot("ytSingle", "ytSinglePlayer");
   replacePlayerSlot("ytLeft", "ytLeftPlayer");
   replacePlayerSlot("ytRight", "ytRightPlayer");
 
-  youtubePlayers.single = new window.YT.Player(
-    "ytSinglePlayer",
-    playerOptions(videoId, false)
-  );
   youtubePlayers.left = new window.YT.Player(
     "ytLeftPlayer",
     playerOptions(videoId, false)
@@ -727,7 +909,7 @@ async function createYouTubePlayers(videoId) {
   updateYoutubeAudioMode();
   setScreenStatus("Vídeo carregado. Toque em Reproduzir.");
 
-  youtubeSyncTimer = window.setInterval(syncYouTubePlayers, 900);
+  youtubeSyncTimer = window.setInterval(syncYouTubePlayers, 1500);
 }
 
 function getPlayerState(player) {
@@ -748,14 +930,11 @@ function getCurrentTime(player) {
 
 function updateYoutubeAudioMode() {
   try {
-    if (vrMode) {
-      youtubePlayers.single?.mute?.();
-      youtubePlayers.left?.unMute?.();
-      youtubePlayers.right?.mute?.();
-    } else {
-      youtubePlayers.single?.unMute?.();
-      youtubePlayers.left?.mute?.();
-      youtubePlayers.right?.mute?.();
+    youtubePlayers.left?.unMute?.();
+    youtubePlayers.right?.mute?.();
+
+    if (!vrMode) {
+      youtubePlayers.right?.pauseVideo?.();
     }
   } catch (error) {
     console.warn("Não foi possível ajustar o áudio:", error);
@@ -763,34 +942,28 @@ function updateYoutubeAudioMode() {
 }
 
 function syncYouTubePlayers() {
-  if (!screenHasVideo) return;
+  if (!screenHasVideo || !vrMode) return;
 
-  const master = vrMode ? youtubePlayers.left : youtubePlayers.single;
-  const followers = vrMode
-    ? [youtubePlayers.right, youtubePlayers.single]
-    : [youtubePlayers.left, youtubePlayers.right];
+  const master = youtubePlayers.left;
+  const follower = youtubePlayers.right;
+  if (!master || !follower) return;
 
   const masterTime = getCurrentTime(master);
   const masterState = getPlayerState(master);
 
-  followers.forEach((player) => {
-    if (!player) return;
-    const difference = Math.abs(getCurrentTime(player) - masterTime);
-
-    try {
-      if (difference > 0.45) {
-        player.seekTo(masterTime, true);
-      }
-
-      if (masterState === 1 && getPlayerState(player) !== 1) {
-        player.playVideo();
-      } else if (masterState === 2 && getPlayerState(player) === 1) {
-        player.pauseVideo();
-      }
-    } catch {
-      // O player pode ainda não estar pronto.
+  try {
+    if (Math.abs(getCurrentTime(follower) - masterTime) > 0.8) {
+      follower.seekTo(masterTime, true);
     }
-  });
+
+    if (masterState === 1 && getPlayerState(follower) !== 1) {
+      follower.playVideo();
+    } else if (masterState !== 1 && getPlayerState(follower) === 1) {
+      follower.pauseVideo();
+    }
+  } catch {
+    // O player pode ainda não estar pronto.
+  }
 }
 
 function playYouTube() {
@@ -800,9 +973,12 @@ function playYouTube() {
   }
 
   try {
-    youtubePlayers.single?.playVideo?.();
     youtubePlayers.left?.playVideo?.();
-    youtubePlayers.right?.playVideo?.();
+    if (vrMode) {
+      youtubePlayers.right?.playVideo?.();
+    } else {
+      youtubePlayers.right?.pauseVideo?.();
+    }
     updateYoutubeAudioMode();
     setScreenStatus("Reproduzindo.");
   } catch (error) {
@@ -813,7 +989,6 @@ function playYouTube() {
 
 function pauseYouTube() {
   try {
-    youtubePlayers.single?.pauseVideo?.();
     youtubePlayers.left?.pauseVideo?.();
     youtubePlayers.right?.pauseVideo?.();
     setScreenStatus("Pausado.");
@@ -822,14 +997,835 @@ function pauseYouTube() {
   }
 }
 
+function prepareHands(results) {
+  if (!results?.landmarks?.length) return [];
 
-function render(results) {
-  resizeCanvas();
+  return results.landmarks.map((rawPoints, index) => {
+    const label = getHandLabel(results, index);
+    const handKey = `${label}-${index}`;
+    const points = smoothLandmarks(handKey, rawPoints);
+    return {
+      label,
+      handKey,
+      points,
+      gesture: detectGesture(points)
+    };
+  });
+}
 
+
+function roundedRectPath(context, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.lineTo(x + width - r, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + r);
+  context.lineTo(x + width, y + height - r);
+  context.quadraticCurveTo(
+    x + width,
+    y + height,
+    x + width - r,
+    y + height
+  );
+  context.lineTo(x + r, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - r);
+  context.lineTo(x, y + r);
+  context.quadraticCurveTo(x, y, x + r, y);
+  context.closePath();
+}
+
+function wrapAngleDifference(value, base) {
+  let difference = value - base;
+  while (difference > 180) difference -= 360;
+  while (difference < -180) difference += 360;
+  return difference;
+}
+
+function getSpatialOffset() {
+  if (
+    !orientationState.received ||
+    orientationState.baseAlpha === null ||
+    orientationState.baseBeta === null
+  ) {
+    return { x: 0, y: 0 };
+  }
+
+  const yaw = wrapAngleDifference(
+    orientationState.alpha,
+    orientationState.baseAlpha
+  );
+  const pitch = orientationState.beta - orientationState.baseBeta;
+
+  return {
+    x: clamp(-yaw / 95, -0.20, 0.20),
+    y: clamp(pitch / 100, -0.14, 0.14)
+  };
+}
+
+function recenterSpatialUi() {
+  if (orientationState.received) {
+    orientationState.baseAlpha = orientationState.alpha;
+    orientationState.baseBeta = orientationState.beta;
+    orientationState.baseGamma = orientationState.gamma;
+  }
+  browserPanel.x = 0.47;
+  browserPanel.y = 0.31;
+}
+
+async function requestOrientationTracking() {
+  try {
+    if (
+      typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function"
+    ) {
+      const result = await DeviceOrientationEvent.requestPermission();
+      orientationState.permission = result;
+      return result === "granted";
+    }
+
+    orientationState.permission = "granted";
+    return true;
+  } catch (error) {
+    console.warn("Giroscópio indisponível:", error);
+    orientationState.permission = "denied";
+    return false;
+  }
+}
+
+window.addEventListener("deviceorientation", (event) => {
+  if (
+    event.alpha === null ||
+    event.beta === null ||
+    event.gamma === null
+  ) {
+    return;
+  }
+
+  orientationState.received = true;
+  orientationState.alpha = event.alpha;
+  orientationState.beta = event.beta;
+  orientationState.gamma = event.gamma;
+
+  if (orientationState.baseAlpha === null) {
+    recenterSpatialUi();
+  }
+}, { passive: true });
+
+function getBrowserLayout() {
+  const offset = getSpatialOffset();
+  const panel = {
+    x: browserPanel.x + offset.x - browserPanel.width / 2,
+    y: browserPanel.y + offset.y - browserPanel.height / 2,
+    width: browserPanel.width,
+    height: browserPanel.height
+  };
+
+  panel.x = clamp(panel.x, 0.02, 0.98 - panel.width);
+  panel.y = clamp(panel.y, 0.02, 0.96 - panel.height);
+
+  const keyboard = {
+    x: clamp(panel.x - 0.04, 0.02, 0.98 - 0.80),
+    y: clamp(panel.y + panel.height + 0.025, 0.48, 0.98 - 0.34),
+    width: 0.80,
+    height: 0.34
+  };
+
+  let cubeX = panel.x + panel.width + 0.025;
+  if (cubeX + 0.105 > 0.98) {
+    cubeX = panel.x - 0.13;
+  }
+
+  const cube = {
+    x: cubeX,
+    y: panel.y + 0.045,
+    width: 0.105,
+    height: 0.13
+  };
+
+  return { panel, keyboard, cube };
+}
+
+function pointInRect(point, rect) {
+  return (
+    point.x >= rect.x &&
+    point.x <= rect.x + rect.width &&
+    point.y >= rect.y &&
+    point.y <= rect.y + rect.height
+  );
+}
+
+function getKeyboardKeyRegions(layout) {
+  const regions = [];
+  const paddingX = 0.018;
+  const paddingY = 0.022;
+  const rowGap = 0.012;
+  const rowHeight =
+    (layout.height - paddingY * 2 - rowGap * (KEYBOARD_ROWS.length - 1)) /
+    KEYBOARD_ROWS.length;
+
+  KEYBOARD_ROWS.forEach((row, rowIndex) => {
+    const y = layout.y + paddingY + rowIndex * (rowHeight + rowGap);
+    const weights = row.map((key) => {
+      if (key === "ESPAÇO") return 3.2;
+      if (key === "BUSCAR") return 2.0;
+      if (key === "FECHAR") return 1.8;
+      return 1;
+    });
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    const keyGap = 0.008;
+    const available =
+      layout.width - paddingX * 2 - keyGap * (row.length - 1);
+    let x = layout.x + paddingX;
+
+    row.forEach((key, keyIndex) => {
+      const width = available * (weights[keyIndex] / totalWeight);
+      regions.push({
+        id: `key:${key}`,
+        key,
+        x,
+        y,
+        width,
+        height: rowHeight
+      });
+      x += width + keyGap;
+    });
+  });
+
+  return regions;
+}
+
+function getBrowserRegions() {
+  const layout = getBrowserLayout();
+  const panel = layout.panel;
+  const headerHeight = 0.065;
+  const searchRect = {
+    id: "search-field",
+    x: panel.x + 0.045,
+    y: panel.y + 0.10,
+    width: panel.width - 0.09,
+    height: 0.09
+  };
+
+  const buttonY = panel.y + 0.215;
+  const buttonGap = 0.018;
+  const buttonWidth = (panel.width - 0.09 - buttonGap * 2) / 3;
+  const buttons = [
+    {
+      id: "search-google",
+      x: panel.x + 0.045,
+      y: buttonY,
+      width: buttonWidth,
+      height: 0.07
+    },
+    {
+      id: "search-images",
+      x: panel.x + 0.045 + buttonWidth + buttonGap,
+      y: buttonY,
+      width: buttonWidth,
+      height: 0.07
+    },
+    {
+      id: "search-youtube",
+      x: panel.x + 0.045 + (buttonWidth + buttonGap) * 2,
+      y: buttonY,
+      width: buttonWidth,
+      height: 0.07
+    }
+  ];
+
+  const suggestionRegions = browserSuggestions.slice(0, 3).map((text, index) => ({
+    id: `suggestion:${index}`,
+    text,
+    x: panel.x + 0.045,
+    y: panel.y + 0.305 + index * 0.052,
+    width: panel.width - 0.09,
+    height: 0.045
+  }));
+
+  const regions = [
+    {
+      id: "panel-title",
+      x: panel.x,
+      y: panel.y,
+      width: panel.width,
+      height: headerHeight
+    },
+    searchRect,
+    ...buttons,
+    ...suggestionRegions,
+    {
+      id: "cube",
+      ...layout.cube
+    }
+  ];
+
+  if (keyboardVisible) {
+    regions.push(...getKeyboardKeyRegions(layout.keyboard));
+  }
+
+  return { layout, regions };
+}
+
+function hitBrowserRegion(point) {
+  const { regions } = getBrowserRegions();
+  for (let index = regions.length - 1; index >= 0; index -= 1) {
+    const region = regions[index];
+    if (pointInRect(point, region)) return region;
+  }
+  return null;
+}
+
+function fitCanvasText(text, maxChars) {
+  const value = String(text || "");
+  if (value.length <= maxChars) return value;
+  return `…${value.slice(-(maxChars - 1))}`;
+}
+
+function drawRoundedBox(context, rect, radius, fill, stroke = null, lineWidth = 1) {
+  roundedRectPath(
+    context,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    radius
+  );
+  context.fillStyle = fill;
+  context.fill();
+  if (stroke) {
+    context.lineWidth = lineWidth;
+    context.strokeStyle = stroke;
+    context.stroke();
+  }
+}
+
+function drawCube(context, rect, active) {
+  const depth = Math.min(rect.width, rect.height) * 0.20;
+  const front = {
+    x: rect.x,
+    y: rect.y + depth,
+    width: rect.width - depth,
+    height: rect.height - depth
+  };
+
+  context.save();
+
+  drawRoundedBox(
+    context,
+    front,
+    Math.min(front.width, front.height) * 0.16,
+    active ? "rgba(210,236,255,0.98)" : "rgba(74,88,110,0.94)",
+    "rgba(255,255,255,0.85)",
+    Math.max(1, rect.width * 0.025)
+  );
+
+  context.beginPath();
+  context.moveTo(front.x, front.y);
+  context.lineTo(front.x + depth, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y);
+  context.lineTo(front.x + front.width, front.y);
+  context.closePath();
+  context.fillStyle = active
+    ? "rgba(163,213,255,0.95)"
+    : "rgba(52,64,83,0.95)";
+  context.fill();
+
+  context.beginPath();
+  context.moveTo(front.x + front.width, front.y);
+  context.lineTo(rect.x + rect.width, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y + rect.height - depth);
+  context.lineTo(front.x + front.width, front.y + front.height);
+  context.closePath();
+  context.fillStyle = active
+    ? "rgba(117,184,240,0.95)"
+    : "rgba(37,47,65,0.95)";
+  context.fill();
+
+  context.fillStyle = active ? "#0b1b2d" : "#f2f6ff";
+  context.font = `800 ${Math.max(10, front.height * 0.38)}px system-ui`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(
+    "⌂",
+    front.x + front.width / 2,
+    front.y + front.height / 2
+  );
+
+  context.restore();
+}
+
+function drawBrowserUiForEye(eyeX, eyeWidth, eyeHeight, eyeSign) {
+  if (!browserVisible) return;
+
+  const scaleX = eyeWidth;
+  const scaleY = eyeHeight;
+  const { layout } = getBrowserRegions();
+  const panel = {
+    x: eyeX + layout.panel.x * scaleX + eyeSign * 2,
+    y: layout.panel.y * scaleY,
+    width: layout.panel.width * scaleX,
+    height: layout.panel.height * scaleY
+  };
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  drawRoundedBox(
+    ctx,
+    panel,
+    Math.min(panel.width, panel.height) * 0.055,
+    "rgba(246,248,252,0.96)",
+    "rgba(200,216,235,0.96)",
+    Math.max(1.5, eyeWidth * 0.004)
+  );
+
+  const titleRect = {
+    x: panel.x,
+    y: panel.y,
+    width: panel.width,
+    height: 0.065 * scaleY
+  };
+  drawRoundedBox(
+    ctx,
+    titleRect,
+    Math.min(titleRect.height * 0.45, panel.width * 0.04),
+    "rgba(232,237,245,0.98)"
+  );
+  ctx.fillStyle = "#263345";
+  ctx.font = `800 ${Math.max(11, eyeHeight * 0.030)}px system-ui`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(
+    "Google • HandFusion",
+    titleRect.x + eyeWidth * 0.035,
+    titleRect.y + titleRect.height / 2
+  );
+
+  ctx.fillStyle = "#4285F4";
+  ctx.font = `900 ${Math.max(18, eyeHeight * 0.058)}px system-ui`;
+  ctx.textAlign = "center";
+  ctx.fillText(
+    "Google",
+    panel.x + panel.width / 2,
+    panel.y + panel.height * 0.18
+  );
+
+  const searchRect = {
+    x: panel.x + 0.045 * scaleX,
+    y: panel.y + 0.10 * scaleY,
+    width: panel.width - 0.09 * scaleX,
+    height: 0.09 * scaleY
+  };
+  drawRoundedBox(
+    ctx,
+    searchRect,
+    searchRect.height / 2,
+    "rgba(255,255,255,0.98)",
+    keyboardVisible
+      ? "rgba(66,133,244,0.95)"
+      : "rgba(185,195,210,0.95)",
+    Math.max(1.2, eyeWidth * 0.004)
+  );
+  ctx.fillStyle = browserQuery ? "#202124" : "#7b8492";
+  ctx.font = `600 ${Math.max(11, eyeHeight * 0.032)}px system-ui`;
+  ctx.textAlign = "left";
+  ctx.fillText(
+    browserQuery
+      ? fitCanvasText(browserQuery, 28)
+      : "Toque aqui e escreva com a mão",
+    searchRect.x + searchRect.height * 0.34,
+    searchRect.y + searchRect.height / 2
+  );
+
+  const { regions } = getBrowserRegions();
+  const labels = {
+    "search-google": "Pesquisar",
+    "search-images": "Imagens",
+    "search-youtube": "YouTube"
+  };
+
+  for (const region of regions) {
+    if (!region.id.startsWith("search-") || region.id === "search-field") continue;
+    const rect = {
+      x: eyeX + region.x * scaleX,
+      y: region.y * scaleY,
+      width: region.width * scaleX,
+      height: region.height * scaleY
+    };
+    drawRoundedBox(
+      ctx,
+      rect,
+      rect.height / 2,
+      region.id === `search-${activeSearchMode}`
+        ? "rgba(66,133,244,0.98)"
+        : "rgba(225,231,240,0.98)",
+      "rgba(190,201,217,0.9)",
+      Math.max(1, eyeWidth * 0.0025)
+    );
+    ctx.fillStyle =
+      region.id === `search-${activeSearchMode}` ? "#fff" : "#263345";
+    ctx.font = `800 ${Math.max(9, eyeHeight * 0.024)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.fillText(
+      labels[region.id] || region.id,
+      rect.x + rect.width / 2,
+      rect.y + rect.height / 2
+    );
+  }
+
+  browserSuggestions.slice(0, 3).forEach((suggestion, index) => {
+    const region = regions.find((item) => item.id === `suggestion:${index}`);
+    if (!region) return;
+    const rect = {
+      x: eyeX + region.x * scaleX,
+      y: region.y * scaleY,
+      width: region.width * scaleX,
+      height: region.height * scaleY
+    };
+    drawRoundedBox(
+      ctx,
+      rect,
+      rect.height * 0.24,
+      "rgba(239,243,249,0.96)"
+    );
+    ctx.fillStyle = "#364152";
+    ctx.font = `600 ${Math.max(8, eyeHeight * 0.021)}px system-ui`;
+    ctx.textAlign = "left";
+    ctx.fillText(
+      fitCanvasText(suggestion, 36),
+      rect.x + eyeWidth * 0.018,
+      rect.y + rect.height / 2
+    );
+  });
+
+  if (!browserSuggestions.length) {
+    ctx.fillStyle = "#6f7886";
+    ctx.font = `600 ${Math.max(8, eyeHeight * 0.021)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.fillText(
+      keyboardVisible
+        ? "Aponte para uma tecla e faça uma pinça rápida."
+        : "Faça o gesto OK por meio segundo para abrir o teclado.",
+      panel.x + panel.width / 2,
+      panel.y + panel.height * 0.79
+    );
+  }
+
+  drawCube(
+    ctx,
+    {
+      x: eyeX + layout.cube.x * scaleX,
+      y: layout.cube.y * scaleY,
+      width: layout.cube.width * scaleX,
+      height: layout.cube.height * scaleY
+    },
+    browserVisible
+  );
+
+  if (keyboardVisible) {
+    const keyboardRect = {
+      x: eyeX + layout.keyboard.x * scaleX,
+      y: layout.keyboard.y * scaleY,
+      width: layout.keyboard.width * scaleX,
+      height: layout.keyboard.height * scaleY
+    };
+
+    drawRoundedBox(
+      ctx,
+      keyboardRect,
+      Math.min(keyboardRect.width, keyboardRect.height) * 0.08,
+      "rgba(221,226,235,0.96)",
+      "rgba(255,255,255,0.92)",
+      Math.max(1.2, eyeWidth * 0.003)
+    );
+
+    for (const region of getKeyboardKeyRegions(layout.keyboard)) {
+      const keyRect = {
+        x: eyeX + region.x * scaleX,
+        y: region.y * scaleY,
+        width: region.width * scaleX,
+        height: region.height * scaleY
+      };
+      drawRoundedBox(
+        ctx,
+        keyRect,
+        keyRect.height * 0.32,
+        region.key === "BUSCAR"
+          ? "rgba(66,133,244,0.98)"
+          : "rgba(255,255,255,0.98)",
+        "rgba(187,196,210,0.95)",
+        Math.max(0.8, eyeWidth * 0.002)
+      );
+      ctx.fillStyle = region.key === "BUSCAR" ? "#fff" : "#202632";
+      ctx.font = `800 ${Math.max(
+        7,
+        eyeHeight * (region.key.length > 2 ? 0.018 : 0.023)
+      )}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.fillText(
+        region.key,
+        keyRect.x + keyRect.width / 2,
+        keyRect.y + keyRect.height / 2
+      );
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawBrowserPointerForEye(hand, eyeX, eyeWidth, eyeHeight) {
+  if (!browserVisible) return;
+
+  const point = hand.points[8];
+  const x = eyeX + point.x * eyeWidth;
+  const y = point.y * eyeHeight;
+  const radius = Math.max(5, Math.min(eyeWidth, eyeHeight) * 0.018);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = hand.label.toLowerCase().includes("left")
+    ? "rgba(86,255,169,0.30)"
+    : "rgba(80,180,255,0.30)";
+  ctx.fill();
+  ctx.lineWidth = Math.max(2, radius * 0.22);
+  ctx.strokeStyle = hand.gesture.pinching
+    ? "rgba(255,231,74,1)"
+    : hand.label.toLowerCase().includes("left")
+      ? "rgba(86,255,169,1)"
+      : "rgba(80,180,255,1)";
+  ctx.stroke();
+
+  if (hand.gesture.okSign) {
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 1.55, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,231,74,0.75)";
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function scheduleBrowserSuggestions() {
+  localStorage.setItem("hf_browser_query", browserQuery);
+
+  if (suggestionTimer) {
+    clearTimeout(suggestionTimer);
+  }
+
+  const query = browserQuery.trim();
+  if (query.length < 2) {
+    browserSuggestions = [];
+    return;
+  }
+
+  suggestionTimer = setTimeout(async () => {
+    try {
+      const response = await fetch(
+        `/api/suggest?q=${encodeURIComponent(query)}`,
+        { cache: "no-store" }
+      );
+      const payload = await response.json();
+      browserSuggestions = Array.isArray(payload?.suggestions)
+        ? payload.suggestions.slice(0, 5)
+        : [];
+    } catch (error) {
+      console.warn("Sugestões indisponíveis:", error);
+      browserSuggestions = [
+        query,
+        `${query} youtube`,
+        `${query} imagens`
+      ];
+    }
+  }, 280);
+}
+
+function submitBrowserSearch(mode = activeSearchMode) {
+  const query = browserQuery.trim();
+  if (!query) {
+    keyboardVisible = true;
+    return;
+  }
+
+  activeSearchMode = mode;
+  localStorage.setItem("hf_browser_query", query);
+
+  let url;
+  if (mode === "images") {
+    url = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
+  } else if (mode === "youtube") {
+    url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  } else {
+    url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+  }
+
+  window.location.assign(url);
+}
+
+function handleVirtualKey(key) {
+  if (key === "⌫") {
+    browserQuery = browserQuery.slice(0, -1);
+  } else if (key === "ESPAÇO") {
+    if (browserQuery && !browserQuery.endsWith(" ")) {
+      browserQuery += " ";
+    }
+  } else if (key === "BUSCAR") {
+    submitBrowserSearch(activeSearchMode);
+    return;
+  } else if (key === "FECHAR") {
+    keyboardVisible = false;
+    return;
+  } else if (browserQuery.length < 100) {
+    browserQuery += key.toLowerCase();
+  }
+
+  scheduleBrowserSuggestions();
+}
+
+function handleBrowserRegion(region, hand, pointer, now) {
+  if (!region) return false;
+
+  if (region.id === "panel-title") {
+    const layout = getBrowserLayout();
+    browserDrag = {
+      handKey: hand.handKey,
+      offsetX: pointer.x - (browserPanel.x + getSpatialOffset().x),
+      offsetY: pointer.y - (browserPanel.y + getSpatialOffset().y)
+    };
+    return true;
+  }
+
+  if (region.id === "search-field") {
+    keyboardVisible = true;
+    return true;
+  }
+
+  if (region.id === "search-google") {
+    activeSearchMode = "google";
+    submitBrowserSearch("google");
+    return true;
+  }
+
+  if (region.id === "search-images") {
+    activeSearchMode = "images";
+    submitBrowserSearch("images");
+    return true;
+  }
+
+  if (region.id === "search-youtube") {
+    activeSearchMode = "youtube";
+    submitBrowserSearch("youtube");
+    return true;
+  }
+
+  if (region.id.startsWith("suggestion:")) {
+    browserQuery = region.text || "";
+    scheduleBrowserSuggestions();
+    keyboardVisible = true;
+    return true;
+  }
+
+  if (region.id.startsWith("key:")) {
+    handleVirtualKey(region.key);
+    return true;
+  }
+
+  if (region.id === "cube") {
+    recenterSpatialUi();
+    keyboardVisible = !keyboardVisible;
+    return true;
+  }
+
+  return false;
+}
+
+function processBrowserInteractions(hands, now) {
+  if (!browserVisible) {
+    browserDrag = null;
+    return;
+  }
+
+  const liveKeys = new Set(hands.map((hand) => hand.handKey));
+
+  for (const [key] of uiHandStates) {
+    if (!liveKeys.has(key)) {
+      uiHandStates.delete(key);
+      if (browserDrag?.handKey === key) browserDrag = null;
+    }
+  }
+
+  for (const hand of hands) {
+    const pointer = {
+      x: hand.points[8].x,
+      y: hand.points[8].y
+    };
+    const state = uiHandStates.get(hand.handKey) || {
+      wasPinching: false,
+      okStart: 0,
+      okTriggered: false
+    };
+
+    if (hand.gesture.okSign) {
+      if (!state.okStart) state.okStart = now;
+
+      if (
+        !state.okTriggered &&
+        now - state.okStart >= 520 &&
+        !hitBrowserRegion(pointer)
+      ) {
+        keyboardVisible = !keyboardVisible;
+        state.okTriggered = true;
+      }
+    } else {
+      state.okStart = 0;
+      state.okTriggered = false;
+    }
+
+    if (browserDrag?.handKey === hand.handKey) {
+      if (hand.gesture.pinching) {
+        const spatial = getSpatialOffset();
+        browserPanel.x = clamp(
+          pointer.x - browserDrag.offsetX - spatial.x,
+          browserPanel.width / 2 + 0.02,
+          1 - browserPanel.width / 2 - 0.02
+        );
+        browserPanel.y = clamp(
+          pointer.y - browserDrag.offsetY - spatial.y,
+          browserPanel.height / 2 + 0.02,
+          1 - browserPanel.height / 2 - 0.02
+        );
+      } else {
+        browserDrag = null;
+      }
+    }
+
+    const pinchStarted =
+      hand.gesture.pinching &&
+      !state.wasPinching &&
+      now - lastUiClickAt > 115;
+
+    if (pinchStarted) {
+      const region = hitBrowserRegion(pointer);
+      if (region && handleBrowserRegion(region, hand, pointer, now)) {
+        lastUiClickAt = now;
+      }
+    }
+
+    state.wasPinching = hand.gesture.pinching;
+    uiHandStates.set(hand.handKey, state);
+  }
+
+  keyboardToggleButton.textContent =
+    `Teclado: ${keyboardVisible ? "ON" : "OFF"}`;
+}
+
+function render(hands, now) {
   const width = canvas.width;
   const height = canvas.height;
   const eyeCount = vrMode ? 2 : 1;
   const eyeWidth = width / eyeCount;
+
+  processBrowserInteractions(hands, now);
 
   ctx.clearRect(0, 0, width, height);
 
@@ -844,84 +1840,103 @@ function render(results) {
 
     drawCameraEye(eyeX, eyeWidth, height);
     drawLabObjects(eyeX, eyeWidth, height, eyeSign);
+    drawBrowserUiForEye(eyeX, eyeWidth, height, eyeSign);
 
-    if (results?.landmarks?.length) {
-      results.landmarks.forEach((rawPoints, index) => {
-        const label = getHandLabel(results, index);
-        const handKey = `${label}-${index}`;
-        const points = smoothLandmarks(handKey, rawPoints);
-        const gesture = detectGesture(points);
-
-        if (eye === 0) {
-          const screenConsumedGesture = interactWithSpatialScreen(
-            handKey,
-            points,
-            gesture
-          );
-          if (!screenConsumedGesture) {
-            interactWithObjects(handKey, points, gesture);
-          }
-        }
-
-        drawHand(
-          points,
-          label,
-          gesture,
-          eyeX,
-          eyeWidth,
-          height,
-          eyeSign
+    for (const hand of hands) {
+      if (eye === 0 && !browserVisible) {
+        const screenConsumedGesture = interactWithSpatialScreen(
+          hand.handKey,
+          hand.points,
+          hand.gesture
         );
-      });
+        if (!screenConsumedGesture) {
+          interactWithObjects(hand.handKey, hand.points, hand.gesture);
+        }
+      }
+
+      drawHand(
+        hand.points,
+        hand.label,
+        hand.gesture,
+        eyeX,
+        eyeWidth,
+        height,
+        eyeSign
+      );
+      drawBrowserPointerForEye(hand, eyeX, eyeWidth, height);
     }
 
     ctx.restore();
   }
 
   if (vrMode) {
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
-    ctx.fillRect(width / 2 - 2, 0, 4, height);
+    ctx.fillStyle = "rgba(0,0,0,0.72)";
+    ctx.fillRect(width / 2 - 1, 0, 2, height);
   }
 
-  updateHud(results);
-  updateSpatialLayout();
-  updateSpatialCursors(results);
+  if (spatialLayoutDirty) {
+    updateSpatialLayout();
+  }
+
+  if (!browserVisible) {
+    updateSpatialCursors(hands);
+  } else {
+    [cursorSingle, cursorLeft, cursorRight].forEach((cursor) =>
+      cursor.classList.add("hidden")
+    );
+  }
+
+  if (now - lastHudAt >= 250) {
+    updateHud(hands);
+    lastHudAt = now;
+  }
 }
 
-function updateHud(results) {
-  const count = results?.landmarks?.length || 0;
+function updateHud(hands) {
+  const count = hands?.length || 0;
   handsLabel.textContent = `${count} ${count === 1 ? "mão" : "mãos"}`;
 
   if (!count) {
-    gestureLabel.textContent = "Sem mãos";
+    gestureLabel.textContent =
+      `Sem mãos • ${currentProfile().label}` +
+      (browserVisible ? " • Google" : "");
     return;
   }
 
-  const labels = results.landmarks.map((points, index) => {
-    const label = getHandLabel(results, index);
-    const handKey = `${label}-${index}`;
-    const smoothed = smoothedByHand.get(handKey) || points;
-    const gesture = detectGesture(smoothed);
-    const translated = label === "Left" ? "Esquerda" : label === "Right" ? "Direita" : label;
-    return `${translated}: ${gesture.name}`;
+  const labels = hands.map((hand) => {
+    const translated =
+      hand.label === "Left"
+        ? "Esquerda"
+        : hand.label === "Right"
+          ? "Direita"
+          : hand.label;
+    return `${translated}: ${hand.gesture.name}`;
   });
 
-  gestureLabel.textContent = labels.join(" • ");
+  gestureLabel.textContent =
+    `${labels.join(" • ")} • ${currentProfile().label}` +
+    (keyboardVisible ? " • Teclado" : "");
 }
 
 async function createLandmarker() {
   setStatus("Carregando inteligência de rastreamento...");
 
-  const vision = await FilesetResolver.forVisionTasks(
-    MEDIAPIPE_WASM_URL
-  );
+  try {
+    handLandmarker?.close?.();
+  } catch {
+    // Alguns navegadores não oferecem close().
+  }
+  handLandmarker = null;
+
+  const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_URL);
+  const profile = currentProfile();
 
   const commonOptions = {
     baseOptions: {
       modelAssetPath: MODEL_URL
     },
     runningMode: "VIDEO",
-    numHands: 2,
+    numHands: profile.numHands,
     minHandDetectionConfidence: 0.48,
     minHandPresenceConfidence: 0.42,
     minTrackingConfidence: 0.42
@@ -947,7 +1962,7 @@ async function createLandmarker() {
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error(
-      "Este navegador não liberou a câmera. Abra pelo Safari em um endereço HTTPS."
+      "Este navegador não liberou a câmera. Abra em um endereço HTTPS."
     );
   }
 
@@ -956,14 +1971,18 @@ async function startCamera() {
   }
 
   setStatus("Pedindo acesso à câmera...");
+  const profile = currentProfile();
 
   stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
       facingMode: { ideal: facingMode },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 30, max: 60 }
+      width: { ideal: profile.cameraWidth },
+      height: { ideal: profile.cameraHeight },
+      frameRate: {
+        ideal: profile.cameraFps,
+        max: profile.cameraFps
+      }
     }
   });
 
@@ -1009,31 +2028,45 @@ async function requestFullscreen() {
 function updateFps(now) {
   const delta = Math.max(1, now - lastFrameTimestamp);
   const instant = 1000 / delta;
-  fpsAverage = fpsAverage ? fpsAverage * 0.9 + instant * 0.1 : instant;
+  fpsAverage = fpsAverage ? fpsAverage * 0.88 + instant * 0.12 : instant;
   lastFrameTimestamp = now;
-  fpsLabel.textContent = `${Math.round(fpsAverage)} FPS`;
+
+  if (now - lastHudAt >= 220) {
+    fpsLabel.textContent = `${Math.round(fpsAverage)} FPS`;
+  }
 }
 
 function loop(now) {
   if (!running) return;
 
-  updateFps(now);
+  const profile = currentProfile();
+  const inferenceInterval = 1000 / profile.trackingFps;
+  const renderInterval = 1000 / profile.renderFps;
 
   if (
+    !profileChanging &&
     handLandmarker &&
     video.readyState >= 2 &&
-    video.currentTime !== lastVideoTime
+    video.currentTime !== lastVideoTime &&
+    now - lastInferenceAt >= inferenceInterval
   ) {
     lastVideoTime = video.currentTime;
+    lastInferenceAt = now;
 
     try {
       lastResults = handLandmarker.detectForVideo(video, now);
+      preparedHands = prepareHands(lastResults);
     } catch (error) {
       console.error("Falha no frame de rastreamento:", error);
     }
   }
 
-  render(lastResults);
+  if (now - lastRenderAt >= renderInterval) {
+    updateFps(now);
+    render(preparedHands, now);
+    lastRenderAt = now;
+  }
+
   requestAnimationFrame(loop);
 }
 
@@ -1042,15 +2075,34 @@ async function startExperience() {
 
   try {
     startButton.textContent = "Carregando...";
+    const orientationPermissionPromise = requestOrientationTracking();
+    performanceMode = performancePreset.value;
+    updatePerformanceUi();
+    resizeCanvas();
     await loadMediaPipe();
-    await Promise.all([createLandmarker(), startCamera()]);
+    await Promise.all([
+      createLandmarker(),
+      startCamera(),
+      orientationPermissionPromise
+    ]);
     await requestWakeLock();
 
     running = true;
     startPanel.classList.add("hidden");
     hud.classList.remove("hidden");
     controls.classList.remove("hidden");
+    browserVisible = true;
+    if (performanceMode === "lite") {
+      skeletonEnabled = false;
+    }
+    skeletonButton.textContent = `Mãos: ${skeletonEnabled ? "ON" : "OFF"}`;
+    browserButton.textContent = "Google: ON";
+    keyboardToggleButton.textContent = "Teclado: OFF";
+    scheduleBrowserSuggestions();
     resizeCanvas();
+    lastInferenceAt = 0;
+    lastRenderAt = 0;
+    lastHudAt = 0;
     requestAnimationFrame(loop);
   } catch (error) {
     console.error(error);
@@ -1065,9 +2117,40 @@ startButton.addEventListener("click", startExperience);
 vrButton.addEventListener("click", () => {
   vrMode = !vrMode;
   vrButton.textContent = vrMode ? "Modo VR" : "Visão única";
-  updateSpatialLayout();
+  spatialLayoutDirty = true;
   updateYoutubeAudioMode();
   syncYouTubePlayers();
+});
+
+browserButton.addEventListener("click", () => {
+  browserVisible = !browserVisible;
+  browserButton.textContent = `Google: ${browserVisible ? "ON" : "OFF"}`;
+  document.body.classList.toggle("browser-active", browserVisible);
+});
+
+keyboardToggleButton.addEventListener("click", () => {
+  keyboardVisible = !keyboardVisible;
+  keyboardToggleButton.textContent =
+    `Teclado: ${keyboardVisible ? "ON" : "OFF"}`;
+});
+
+recenterButton.addEventListener("click", () => {
+  recenterSpatialUi();
+});
+
+performancePreset.addEventListener("change", () => {
+  applyPerformanceMode(performancePreset.value, running);
+});
+
+performanceButton.addEventListener("click", async () => {
+  const modes = ["lite", "balanced", "quality"];
+  const nextIndex = (modes.indexOf(performanceMode) + 1) % modes.length;
+  await applyPerformanceMode(modes[nextIndex], true);
+});
+
+skeletonButton.addEventListener("click", () => {
+  skeletonEnabled = !skeletonEnabled;
+  skeletonButton.textContent = `Mãos: ${skeletonEnabled ? "ON" : "OFF"}`;
 });
 
 objectsButton.addEventListener("click", () => {
@@ -1090,6 +2173,8 @@ cameraButton.addEventListener("click", async () => {
 
 
 screenButton.addEventListener("click", () => {
+  browserVisible = false;
+  browserButton.textContent = "Google: OFF";
   screenPanel.classList.remove("hidden");
   controls.classList.add("hidden");
   showControlsButton.classList.add("hidden");
@@ -1128,7 +2213,7 @@ pauseYoutubeButton.addEventListener("click", pauseYouTube);
 centerScreenButton.addEventListener("click", () => {
   spatialScreenState.x = 0.5;
   spatialScreenState.y = 0.46;
-  updateSpatialLayout();
+  spatialLayoutDirty = true;
   showSpatialScreen(true);
 });
 
@@ -1147,7 +2232,7 @@ screenVisibilityButton.addEventListener("click", () => {
 
 screenSizeInput.addEventListener("input", () => {
   spatialScreenState.width = Number(screenSizeInput.value);
-  updateSpatialLayout();
+  spatialLayoutDirty = true;
 });
 
 youtubeUrlInput.addEventListener("keydown", (event) => {
@@ -1169,14 +2254,8 @@ showControlsButton.addEventListener("click", () => {
   showControlsButton.classList.add("hidden");
 });
 
-window.addEventListener("resize", () => {
-  resizeCanvas();
-  updateSpatialLayout();
-});
-window.addEventListener("orientationchange", () => {
-  resizeCanvas();
-  updateSpatialLayout();
-});
+window.addEventListener("resize", resizeCanvas);
+window.addEventListener("orientationchange", resizeCanvas);
 
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState === "visible" && running && !wakeLock) {
