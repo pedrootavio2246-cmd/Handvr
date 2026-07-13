@@ -1,4 +1,4 @@
-# HandFusion VR v0.2 — protótipo experimental
+# HandFusion VR v0.3 — protótipo experimental
 
 Protótipo de hand tracking para **iPhone + VR Box**, executado no navegador.
 
@@ -75,3 +75,23 @@ A v0.2:
 - carrega o MediaPipe somente depois do toque;
 - mostra mensagens de erro na própria tela;
 - adiciona cache-busting no `app.js`.
+
+
+## Novidade da v0.3 — tela espacial do YouTube
+
+1. Inicie a câmera e o rastreamento.
+2. Abra **Tela YouTube**.
+3. Cole um link de vídeo e toque em **Carregar vídeo**.
+4. Toque em **Reproduzir**.
+5. Feche o painel.
+6. Faça uma pinça sobre a tela virtual e mova a mão para arrastá-la.
+7. Use o controle **Tamanho da tela** para redimensionar.
+
+A tela é duplicada para as duas lentes no modo VR. Um player fica com áudio e o outro é mantido mudo e sincronizado.
+
+### Limitações
+
+- O navegador do iPhone pode exigir um toque real no botão Reproduzir.
+- A pinça move a janela, mas não clica diretamente dentro do iframe do YouTube.
+- Outros sites podem impedir que suas páginas sejam abertas dentro de uma tela incorporada.
+- Como o rastreamento vem de uma câmera comum, a janela se move em 2D e não fica ancorada no espaço real como num Meta Quest.

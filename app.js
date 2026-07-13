@@ -1,4 +1,4 @@
-// HandFusion VR v0.2
+// HandFusion VR v0.3
 // MediaPipe is imported only after the user presses Start.
 // This keeps the interface alive and shows a useful error if the CDN fails.
 
@@ -57,6 +57,28 @@ const handsLabel = document.querySelector("#hands");
 const gestureLabel = document.querySelector("#gesture");
 const rotateNotice = document.querySelector("#rotateNotice");
 
+const spatialLayer = document.querySelector("#spatialLayer");
+const screenSingle = document.querySelector("#screenSingle");
+const screenLeft = document.querySelector("#screenLeft");
+const screenRight = document.querySelector("#screenRight");
+const cursorSingle = document.querySelector("#cursorSingle");
+const cursorLeft = document.querySelector("#cursorLeft");
+const cursorRight = document.querySelector("#cursorRight");
+
+const screenPanel = document.querySelector("#screenPanel");
+const screenButton = document.querySelector("#screenButton");
+const screenVisibilityButton = document.querySelector("#screenVisibilityButton");
+const youtubeUrlInput = document.querySelector("#youtubeUrl");
+const loadYoutubeButton = document.querySelector("#loadYoutubeButton");
+const playYoutubeButton = document.querySelector("#playYoutubeButton");
+const pauseYoutubeButton = document.querySelector("#pauseYoutubeButton");
+const centerScreenButton = document.querySelector("#centerScreenButton");
+const hideScreenButton = document.querySelector("#hideScreenButton");
+const closeScreenPanelButton = document.querySelector("#closeScreenPanelButton");
+const screenSizeInput = document.querySelector("#screenSize");
+const screenStatus = document.querySelector("#screenStatus");
+
+
 let handLandmarker = null;
 let stream = null;
 let facingMode = "environment";
@@ -68,6 +90,23 @@ let lastFrameTimestamp = performance.now();
 let fpsAverage = 0;
 let lastResults = null;
 let wakeLock = null;
+
+let screenVisible = false;
+let screenHasVideo = false;
+let screenGrabbedBy = null;
+let screenGrabOffset = { x: 0, y: 0 };
+let lastSpatialPointer = null;
+let youtubeApiPromise = null;
+let youtubePlayers = {};
+let youtubeSyncTimer = null;
+
+const spatialScreenState = {
+  x: 0.5,
+  y: 0.46,
+  width: 0.64,
+  videoId: null
+};
+
 
 const smoothedByHand = new Map();
 const grabbedByHand = new Map();
@@ -354,6 +393,436 @@ function interactWithObjects(handKey, points, gesture) {
   }
 }
 
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parseYouTubeVideoId(value) {
+  const input = String(value || "").trim();
+
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) {
+    return input;
+  }
+
+  try {
+    const url = new URL(input);
+    const hostname = url.hostname.replace(/^www\./, "");
+
+    if (hostname === "youtu.be") {
+      const id = url.pathname.split("/").filter(Boolean)[0];
+      return /^[a-zA-Z0-9_-]{11}$/.test(id || "") ? id : null;
+    }
+
+    if (
+      hostname === "youtube.com" ||
+      hostname === "m.youtube.com" ||
+      hostname === "music.youtube.com" ||
+      hostname === "youtube-nocookie.com"
+    ) {
+      const watchId = url.searchParams.get("v");
+      if (/^[a-zA-Z0-9_-]{11}$/.test(watchId || "")) {
+        return watchId;
+      }
+
+      const parts = url.pathname.split("/").filter(Boolean);
+      const typeIndex = parts.findIndex((part) =>
+        ["embed", "shorts", "live"].includes(part)
+      );
+      const pathId = typeIndex >= 0 ? parts[typeIndex + 1] : null;
+      return /^[a-zA-Z0-9_-]{11}$/.test(pathId || "") ? pathId : null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function setScreenStatus(message) {
+  screenStatus.textContent = message;
+}
+
+function showSpatialScreen(visible = true) {
+  screenVisible = visible;
+  spatialLayer.classList.toggle("hidden", !visible);
+  screenVisibilityButton.textContent = `Tela: ${visible ? "ON" : "OFF"}`;
+
+  if (!visible) {
+    screenGrabbedBy = null;
+    [screenSingle, screenLeft, screenRight].forEach((element) =>
+      element.classList.remove("grabbed")
+    );
+  }
+
+  updateSpatialLayout();
+}
+
+function updateSpatialLayout() {
+  if (!screenVisible) return;
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const eyeWidth = vrMode ? viewportWidth / 2 : viewportWidth;
+
+  const screenWidth = spatialScreenState.width * eyeWidth;
+  const screenHeight = screenWidth * (9 / 16) + 28;
+  const halfWidthNorm = spatialScreenState.width / 2;
+  const halfHeightNorm = screenHeight / (2 * viewportHeight);
+
+  spatialScreenState.x = clamp(
+    spatialScreenState.x,
+    halfWidthNorm,
+    1 - halfWidthNorm
+  );
+  spatialScreenState.y = clamp(
+    spatialScreenState.y,
+    halfHeightNorm,
+    1 - halfHeightNorm
+  );
+
+  const apply = (element, eyeIndex, localEyeWidth) => {
+    const eyeOffset = eyeIndex * localEyeWidth;
+    element.style.width = `${spatialScreenState.width * localEyeWidth}px`;
+    element.style.left = `${
+      eyeOffset + spatialScreenState.x * localEyeWidth
+    }px`;
+    element.style.top = `${spatialScreenState.y * viewportHeight}px`;
+  };
+
+  if (vrMode) {
+    screenSingle.classList.add("hidden");
+    screenLeft.classList.remove("hidden");
+    screenRight.classList.remove("hidden");
+    apply(screenLeft, 0, viewportWidth / 2);
+    apply(screenRight, 1, viewportWidth / 2);
+  } else {
+    screenSingle.classList.remove("hidden");
+    screenLeft.classList.add("hidden");
+    screenRight.classList.add("hidden");
+    apply(screenSingle, 0, viewportWidth);
+  }
+}
+
+function spatialScreenNormalizedHeight() {
+  const eyeWidth = vrMode ? window.innerWidth / 2 : window.innerWidth;
+  const pixelHeight =
+    spatialScreenState.width * eyeWidth * (9 / 16) + 28;
+  return pixelHeight / Math.max(window.innerHeight, 1);
+}
+
+function isInsideSpatialScreen(point) {
+  const halfWidth = spatialScreenState.width / 2;
+  const halfHeight = spatialScreenNormalizedHeight() / 2;
+
+  return (
+    Math.abs(point.x - spatialScreenState.x) <= halfWidth &&
+    Math.abs(point.y - spatialScreenState.y) <= halfHeight
+  );
+}
+
+function interactWithSpatialScreen(handKey, points, gesture) {
+  if (!screenVisible) {
+    if (screenGrabbedBy === handKey) screenGrabbedBy = null;
+    return false;
+  }
+
+  const pinchPoint = {
+    x: (points[4].x + points[8].x) / 2,
+    y: (points[4].y + points[8].y) / 2
+  };
+  lastSpatialPointer = { ...pinchPoint, pinching: gesture.pinching };
+
+  if (!gesture.pinching) {
+    if (screenGrabbedBy === handKey) {
+      screenGrabbedBy = null;
+      [screenSingle, screenLeft, screenRight].forEach((element) =>
+        element.classList.remove("grabbed")
+      );
+    }
+    return false;
+  }
+
+  if (!screenGrabbedBy && isInsideSpatialScreen(pinchPoint)) {
+    screenGrabbedBy = handKey;
+    screenGrabOffset = {
+      x: pinchPoint.x - spatialScreenState.x,
+      y: pinchPoint.y - spatialScreenState.y
+    };
+
+    [screenSingle, screenLeft, screenRight].forEach((element) =>
+      element.classList.add("grabbed")
+    );
+  }
+
+  if (screenGrabbedBy === handKey) {
+    const halfWidth = spatialScreenState.width / 2;
+    const halfHeight = spatialScreenNormalizedHeight() / 2;
+
+    spatialScreenState.x = clamp(
+      pinchPoint.x - screenGrabOffset.x,
+      halfWidth,
+      1 - halfWidth
+    );
+    spatialScreenState.y = clamp(
+      pinchPoint.y - screenGrabOffset.y,
+      halfHeight,
+      1 - halfHeight
+    );
+    updateSpatialLayout();
+    return true;
+  }
+
+  return false;
+}
+
+function updateSpatialCursors(results) {
+  const cursors = [cursorSingle, cursorLeft, cursorRight];
+
+  if (!screenVisible || !results?.landmarks?.length) {
+    cursors.forEach((cursor) => cursor.classList.add("hidden"));
+    return;
+  }
+
+  const rawPoints = results.landmarks[0];
+  const label = getHandLabel(results, 0);
+  const points = smoothedByHand.get(`${label}-0`) || rawPoints;
+  const gesture = detectGesture(points);
+  const point = {
+    x: (points[4].x + points[8].x) / 2,
+    y: (points[4].y + points[8].y) / 2
+  };
+
+  const placeCursor = (cursor, eyeIndex, eyeWidth) => {
+    cursor.classList.remove("hidden");
+    cursor.classList.toggle("pinching", gesture.pinching);
+    cursor.style.left = `${eyeIndex * eyeWidth + point.x * eyeWidth}px`;
+    cursor.style.top = `${point.y * window.innerHeight}px`;
+  };
+
+  if (vrMode) {
+    cursorSingle.classList.add("hidden");
+    placeCursor(cursorLeft, 0, window.innerWidth / 2);
+    placeCursor(cursorRight, 1, window.innerWidth / 2);
+  } else {
+    cursorLeft.classList.add("hidden");
+    cursorRight.classList.add("hidden");
+    placeCursor(cursorSingle, 0, window.innerWidth);
+  }
+}
+
+function loadYouTubeApi() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (youtubeApiPromise) return youtubeApiPromise;
+
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+
+    window.onYouTubeIframeAPIReady = () => {
+      try {
+        previousReady?.();
+      } finally {
+        resolve(window.YT);
+      }
+    };
+
+    const existing = document.querySelector(
+      'script[src="https://www.youtube.com/iframe_api"]'
+    );
+    if (!existing) {
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      script.onerror = () =>
+        reject(new Error("Não consegui carregar o player do YouTube."));
+      document.head.appendChild(script);
+    }
+
+    window.setTimeout(() => {
+      if (!window.YT?.Player) {
+        reject(
+          new Error(
+            "O YouTube demorou demais para carregar. Verifique a internet."
+          )
+        );
+      }
+    }, 15000);
+  });
+
+  return youtubeApiPromise;
+}
+
+function replacePlayerSlot(slotId, childId) {
+  const slot = document.getElementById(slotId);
+  slot.replaceChildren();
+  const child = document.createElement("div");
+  child.id = childId;
+  slot.appendChild(child);
+}
+
+function destroyYouTubePlayers() {
+  Object.values(youtubePlayers).forEach((player) => {
+    try {
+      player?.destroy?.();
+    } catch (error) {
+      console.warn("Falha ao destruir player:", error);
+    }
+  });
+  youtubePlayers = {};
+
+  if (youtubeSyncTimer) {
+    window.clearInterval(youtubeSyncTimer);
+    youtubeSyncTimer = null;
+  }
+}
+
+function playerOptions(videoId, muted = false) {
+  return {
+    videoId,
+    playerVars: {
+      playsinline: 1,
+      controls: 0,
+      rel: 0,
+      fs: 0,
+      disablekb: 1,
+      enablejsapi: 1,
+      origin: window.location.origin
+    },
+    events: {
+      onReady(event) {
+        if (muted) event.target.mute();
+      },
+      onError(event) {
+        setScreenStatus(`O YouTube retornou o erro ${event.data}.`);
+      }
+    }
+  };
+}
+
+async function createYouTubePlayers(videoId) {
+  setScreenStatus("Carregando player do YouTube...");
+  await loadYouTubeApi();
+  destroyYouTubePlayers();
+
+  replacePlayerSlot("ytSingle", "ytSinglePlayer");
+  replacePlayerSlot("ytLeft", "ytLeftPlayer");
+  replacePlayerSlot("ytRight", "ytRightPlayer");
+
+  youtubePlayers.single = new window.YT.Player(
+    "ytSinglePlayer",
+    playerOptions(videoId, false)
+  );
+  youtubePlayers.left = new window.YT.Player(
+    "ytLeftPlayer",
+    playerOptions(videoId, false)
+  );
+  youtubePlayers.right = new window.YT.Player(
+    "ytRightPlayer",
+    playerOptions(videoId, true)
+  );
+
+  spatialScreenState.videoId = videoId;
+  screenHasVideo = true;
+  showSpatialScreen(true);
+  updateYoutubeAudioMode();
+  setScreenStatus("Vídeo carregado. Toque em Reproduzir.");
+
+  youtubeSyncTimer = window.setInterval(syncYouTubePlayers, 900);
+}
+
+function getPlayerState(player) {
+  try {
+    return player?.getPlayerState?.();
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentTime(player) {
+  try {
+    return Number(player?.getCurrentTime?.() || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function updateYoutubeAudioMode() {
+  try {
+    if (vrMode) {
+      youtubePlayers.single?.mute?.();
+      youtubePlayers.left?.unMute?.();
+      youtubePlayers.right?.mute?.();
+    } else {
+      youtubePlayers.single?.unMute?.();
+      youtubePlayers.left?.mute?.();
+      youtubePlayers.right?.mute?.();
+    }
+  } catch (error) {
+    console.warn("Não foi possível ajustar o áudio:", error);
+  }
+}
+
+function syncYouTubePlayers() {
+  if (!screenHasVideo) return;
+
+  const master = vrMode ? youtubePlayers.left : youtubePlayers.single;
+  const followers = vrMode
+    ? [youtubePlayers.right, youtubePlayers.single]
+    : [youtubePlayers.left, youtubePlayers.right];
+
+  const masterTime = getCurrentTime(master);
+  const masterState = getPlayerState(master);
+
+  followers.forEach((player) => {
+    if (!player) return;
+    const difference = Math.abs(getCurrentTime(player) - masterTime);
+
+    try {
+      if (difference > 0.45) {
+        player.seekTo(masterTime, true);
+      }
+
+      if (masterState === 1 && getPlayerState(player) !== 1) {
+        player.playVideo();
+      } else if (masterState === 2 && getPlayerState(player) === 1) {
+        player.pauseVideo();
+      }
+    } catch {
+      // O player pode ainda não estar pronto.
+    }
+  });
+}
+
+function playYouTube() {
+  if (!screenHasVideo) {
+    setScreenStatus("Primeiro cole um link e carregue o vídeo.");
+    return;
+  }
+
+  try {
+    youtubePlayers.single?.playVideo?.();
+    youtubePlayers.left?.playVideo?.();
+    youtubePlayers.right?.playVideo?.();
+    updateYoutubeAudioMode();
+    setScreenStatus("Reproduzindo.");
+  } catch (error) {
+    console.error(error);
+    setScreenStatus("O player ainda está carregando. Tente novamente.");
+  }
+}
+
+function pauseYouTube() {
+  try {
+    youtubePlayers.single?.pauseVideo?.();
+    youtubePlayers.left?.pauseVideo?.();
+    youtubePlayers.right?.pauseVideo?.();
+    setScreenStatus("Pausado.");
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+
 function render(results) {
   resizeCanvas();
 
@@ -384,7 +853,14 @@ function render(results) {
         const gesture = detectGesture(points);
 
         if (eye === 0) {
-          interactWithObjects(handKey, points, gesture);
+          const screenConsumedGesture = interactWithSpatialScreen(
+            handKey,
+            points,
+            gesture
+          );
+          if (!screenConsumedGesture) {
+            interactWithObjects(handKey, points, gesture);
+          }
         }
 
         drawHand(
@@ -408,6 +884,8 @@ function render(results) {
   }
 
   updateHud(results);
+  updateSpatialLayout();
+  updateSpatialCursors(results);
 }
 
 function updateHud(results) {
@@ -587,6 +1065,9 @@ startButton.addEventListener("click", startExperience);
 vrButton.addEventListener("click", () => {
   vrMode = !vrMode;
   vrButton.textContent = vrMode ? "Modo VR" : "Visão única";
+  updateSpatialLayout();
+  updateYoutubeAudioMode();
+  syncYouTubePlayers();
 });
 
 objectsButton.addEventListener("click", () => {
@@ -607,6 +1088,75 @@ cameraButton.addEventListener("click", async () => {
   }
 });
 
+
+screenButton.addEventListener("click", () => {
+  screenPanel.classList.remove("hidden");
+  controls.classList.add("hidden");
+  showControlsButton.classList.add("hidden");
+});
+
+closeScreenPanelButton.addEventListener("click", () => {
+  screenPanel.classList.add("hidden");
+  controls.classList.remove("hidden");
+});
+
+loadYoutubeButton.addEventListener("click", async () => {
+  const videoId = parseYouTubeVideoId(youtubeUrlInput.value);
+
+  if (!videoId) {
+    setScreenStatus("Link inválido. Cole o link completo de um vídeo.");
+    return;
+  }
+
+  loadYoutubeButton.disabled = true;
+  loadYoutubeButton.textContent = "Carregando...";
+
+  try {
+    await createYouTubePlayers(videoId);
+  } catch (error) {
+    console.error(error);
+    setScreenStatus(error?.message || "Não consegui abrir o vídeo.");
+  } finally {
+    loadYoutubeButton.disabled = false;
+    loadYoutubeButton.textContent = "Carregar vídeo";
+  }
+});
+
+playYoutubeButton.addEventListener("click", playYouTube);
+pauseYoutubeButton.addEventListener("click", pauseYouTube);
+
+centerScreenButton.addEventListener("click", () => {
+  spatialScreenState.x = 0.5;
+  spatialScreenState.y = 0.46;
+  updateSpatialLayout();
+  showSpatialScreen(true);
+});
+
+hideScreenButton.addEventListener("click", () => {
+  showSpatialScreen(false);
+});
+
+screenVisibilityButton.addEventListener("click", () => {
+  if (!screenHasVideo && !screenVisible) {
+    screenPanel.classList.remove("hidden");
+    controls.classList.add("hidden");
+    return;
+  }
+  showSpatialScreen(!screenVisible);
+});
+
+screenSizeInput.addEventListener("input", () => {
+  spatialScreenState.width = Number(screenSizeInput.value);
+  updateSpatialLayout();
+});
+
+youtubeUrlInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    loadYoutubeButton.click();
+  }
+});
+
+
 fullscreenButton.addEventListener("click", requestFullscreen);
 
 hideControlsButton.addEventListener("click", () => {
@@ -619,8 +1169,14 @@ showControlsButton.addEventListener("click", () => {
   showControlsButton.classList.add("hidden");
 });
 
-window.addEventListener("resize", resizeCanvas);
-window.addEventListener("orientationchange", resizeCanvas);
+window.addEventListener("resize", () => {
+  resizeCanvas();
+  updateSpatialLayout();
+});
+window.addEventListener("orientationchange", () => {
+  resizeCanvas();
+  updateSpatialLayout();
+});
 
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState === "visible" && running && !wakeLock) {
