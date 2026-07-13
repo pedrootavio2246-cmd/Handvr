@@ -1,4 +1,4 @@
-# HandFusion VR — protótipo experimental
+# HandFusion VR v0.2 — protótipo experimental
 
 Protótipo de hand tracking para **iPhone + VR Box**, executado no navegador.
 
@@ -64,3 +64,14 @@ A primeira abertura precisa de internet para carregar a biblioteca e o modelo do
 - reconhecimento de mais gestos;
 - modo de navegador espacial;
 - versão nativa iOS em Swift/MediaPipe.
+
+
+## Correção da v0.2
+
+A v0.1 apontava para uma versão incorreta do pacote MediaPipe no CDN. Isso podia impedir todo o JavaScript de carregar, deixando o botão **Iniciar câmera e rastreamento** sem reação.
+
+A v0.2:
+- usa a versão estável 0.10.35;
+- carrega o MediaPipe somente depois do toque;
+- mostra mensagens de erro na própria tela;
+- adiciona cache-busting no `app.js`.

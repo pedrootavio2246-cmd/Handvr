@@ -1,7 +1,36 @@
-import {
-  FilesetResolver,
-  HandLandmarker
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm";
+// HandFusion VR v0.2
+// MediaPipe is imported only after the user presses Start.
+// This keeps the interface alive and shows a useful error if the CDN fails.
+
+let FilesetResolver = null;
+let HandLandmarker = null;
+
+const MEDIAPIPE_VERSION = "0.10.35";
+const MEDIAPIPE_MODULE_URL =
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/+esm`;
+const MEDIAPIPE_WASM_URL =
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
+
+async function loadMediaPipe() {
+  if (FilesetResolver && HandLandmarker) return;
+
+  setStatus("Baixando o rastreamento de mãos...");
+
+  try {
+    const module = await import(MEDIAPIPE_MODULE_URL);
+    FilesetResolver = module.FilesetResolver;
+    HandLandmarker = module.HandLandmarker;
+
+    if (!FilesetResolver || !HandLandmarker) {
+      throw new Error("O módulo carregou, mas não trouxe o Hand Landmarker.");
+    }
+  } catch (error) {
+    console.error("Falha ao carregar MediaPipe:", error);
+    throw new Error(
+      "Não consegui carregar o MediaPipe. Verifique a internet e recarregue a página."
+    );
+  }
+}
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
@@ -406,7 +435,7 @@ async function createLandmarker() {
   setStatus("Carregando inteligência de rastreamento...");
 
   const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
+    MEDIAPIPE_WASM_URL
   );
 
   const commonOptions = {
@@ -534,6 +563,8 @@ async function startExperience() {
   startButton.disabled = true;
 
   try {
+    startButton.textContent = "Carregando...";
+    await loadMediaPipe();
     await Promise.all([createLandmarker(), startCamera()]);
     await requestWakeLock();
 
@@ -546,6 +577,7 @@ async function startExperience() {
   } catch (error) {
     console.error(error);
     setStatus(error?.message || "Não foi possível iniciar.");
+    startButton.textContent = "Tentar novamente";
     startButton.disabled = false;
   }
 }
@@ -597,3 +629,23 @@ document.addEventListener("visibilitychange", async () => {
 });
 
 resizeCanvas();
+
+
+window.addEventListener("error", (event) => {
+  console.error("Erro global:", event.error || event.message);
+  if (!running) {
+    setStatus(`Erro: ${event.message || "falha ao carregar o aplicativo"}`);
+    startButton.disabled = false;
+    startButton.textContent = "Tentar novamente";
+  }
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("Promessa rejeitada:", event.reason);
+  if (!running) {
+    const message = event.reason?.message || "falha inesperada";
+    setStatus(`Erro: ${message}`);
+    startButton.disabled = false;
+    startButton.textContent = "Tentar novamente";
+  }
+});
