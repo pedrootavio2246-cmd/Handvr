@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#05070d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="HandFusion VR" />
+  <title>HandFusion VR</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <video id="camera" playsinline muted></video>
+  <canvas id="view"></canvas>
+
+  <div id="rotateNotice" class="notice hidden">
+    Gire o iPhone para o modo paisagem.
+  </div>
+
+  <section id="startPanel" class="panel">
+    <h1>HandFusion VR</h1>
+    <p>Protótipo experimental de hand tracking para iPhone + VR Box.</p>
+    <button id="startButton" class="primary">Iniciar câmera e rastreamento</button>
+    <p class="small">
+      Use em local bem iluminado. A câmera traseira precisa ficar descoberta.
+    </p>
+    <div id="bootStatus" class="status">Aguardando início.</div>
+  </section>
+
+  <header id="hud" class="hud hidden">
+    <div class="badge">
+      <span id="fps">0 FPS</span>
+      <span id="hands">0 mãos</span>
+    </div>
+    <div id="gesture" class="gesture">Sem mãos</div>
+  </header>
+
+  <aside id="controls" class="controls hidden">
+    <button id="vrButton">Modo VR</button>
+    <button id="objectsButton">Objetos: ON</button>
+    <button id="cameraButton">Trocar câmera</button>
+    <button id="fullscreenButton">Tela cheia</button>
+    <label>
+      Suavização
+      <input id="smoothing" type="range" min="0" max="0.92" step="0.02" value="0.70" />
+    </label>
+    <label>
+      Separação
+      <input id="eyeSeparation" type="range" min="0" max="28" step="1" value="10" />
+    </label>
+    <button id="hideControlsButton">Ocultar painel</button>
+  </aside>
+
+  <button id="showControlsButton" class="floating hidden">⚙️</button>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
